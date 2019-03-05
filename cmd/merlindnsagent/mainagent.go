@@ -35,7 +35,7 @@ import (
 )
 
 // GLOBAL VARIABLES
-var url = "frogs.supershady.ru"
+var url = "127.0.0.1"
 var build = "nonRelease"
 
 func main() {
