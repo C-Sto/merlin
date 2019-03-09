@@ -58,7 +58,7 @@ func main() {
 	//use http2 transport
 	trnsprt := dns.DNSCommClient{}.New("dns", "", "aa")
 	trnsprt.Host = url
-	trnsprt.NS = "127.0.0.1"
+	trnsprt.NS = *protocol
 	//agent.New
 	a := agent.New(*protocol, *verbose, *debug, &trnsprt)
 	a.WaitTime = *sleep

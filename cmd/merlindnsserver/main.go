@@ -68,7 +68,7 @@ func main() {
 	// Start Merlin Server to listen for agents
 	//server, err := http2.New(*ip, *port, *proto, *key, *crt)
 	server, err := dns.New("0.0.0.0", 53, "dns", *domain, "")
-
+	//	server, err := cha.New("0.0.0.0", 53, "cha", *domain, "key")
 	if err != nil {
 		color.Red(err.Error())
 	} else {
